@@ -1,0 +1,11 @@
+sounddevice
+soundfile
+numpy
+openai
+anthropic
+python-dotenv
+websockets
+pytest
+requests
+flask
+flask-sock

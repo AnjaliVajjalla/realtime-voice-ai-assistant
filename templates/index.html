@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Real-Time Voice AI Assistant</title>
+  <style>
+    body { font-family: -apple-system, sans-serif; max-width: 600px; margin: 60px auto; padding: 0 20px; color: #222; }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; margin-top: 40px; }
+    button { font-size: 16px; padding: 12px 24px; border-radius: 8px; border: none; background: #222; color: white; cursor: pointer; }
+    button:disabled { background: #999; cursor: not-allowed; }
+    #status { margin: 20px 0; font-weight: bold; color: #555; }
+    #chatName { color: #888; font-weight: normal; }
+    .btn-row { display: flex; gap: 10px; }
+    #newChatBtn { background: #eee; color: #222; }
+    #stopBtn { background: #b3261e; display: none; }
+    .turn { background: #f4f4f4; border-radius: 8px; padding: 14px; margin: 10px 0; }
+    .label { font-size: 12px; text-transform: uppercase; color: #888; margin-bottom: 4px; }
+    .you { margin-bottom: 10px; }
+    .latency { font-size: 12px; color: #888; margin-top: 8px; }
+    .chat-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+    .chat-item { flex: 1; display: block; text-align: left; background: #f4f4f4; color: #222; padding: 10px 14px; font-size: 14px; }
+    .chat-item:hover { background: #e8e8e8; }
+    .delete-chat-btn { background: #f4f4f4; color: #b3261e; padding: 10px 14px; font-size: 14px; }
+    .delete-chat-btn:hover { background: #fbe3e1; }
+    #backToCurrentBtn { background: #eee; color: #222; margin-bottom: 10px; display: none; }
+  </style>
+</head>
+<body>
+  <h1><span id="chatName"></span>, your Real-Time Voice AI Assistant</h1>
+  <p>Click the button, then speak. Recording stops automatically when you pause, or click Stop Recording.</p>
+  <div class="btn-row">
+    <button id="talkBtn">Start turn</button>
+    <button id="stopBtn">Stop Recording</button>
+    <button id="newChatBtn">New Chat</button>
+  </div>
+  <div id="status"></div>
+  <button id="backToCurrentBtn">Back to current chat</button>
+  <div id="log"></div>
+
+  <h2>Past Chats</h2>
+  <div id="chatList"></div>
+
+  <script>
+    const btn = document.getElementById("talkBtn");
+    const stopBtn = document.getElementById("stopBtn");
+    const newChatBtn = document.getElementById("newChatBtn");
+    const status = document.getElementById("status");
+    const log = document.getElementById("log");
+    const chatNameEl = document.getElementById("chatName");
+    const chatListEl = document.getElementById("chatList");
+    const backToCurrentBtn = document.getElementById("backToCurrentBtn");
+
+    let currentChatId = null;
+    let ws = null;
+
+    const EVENT_LABELS = {
+      recording: "Listening... speak now.",
+      transcribing: "Transcribing...",
+      thinking: "Thinking...",
+      speaking: "Speaking response...",
+    };
+
+    function turnHtml(transcript, reply, timings) {
+      const replyHtml = reply !== null && reply !== undefined
+        ? `<div>
+             <div class="label">Assistant said</div>
+             <div>${reply}</div>
+           </div>`
+        : `<div class="label">(stop phrase, no reply, session ended)</div>`;
+      return `
+        <div class="turn">
+          <div class="you">
+            <div class="label">You said</div>
+            <div>${transcript || "—"}</div>
+          </div>
+          ${replyHtml}
+          <div class="latency">Latency (seconds): ${JSON.stringify(timings)}</div>
+        </div>
+      `;
+    }
+
+    function addTurn(transcript, reply, timings) {
+      log.insertAdjacentHTML("beforeend", turnHtml(transcript, reply, timings));
+    }
+
+    function showGreeting(name) {
+      log.innerHTML = `
+        <div class="turn">
+          <div class="label">Assistant said</div>
+          <div>Hi, my name is ${name}. How can I help you?</div>
+        </div>
+      `;
+    }
+
+    function setRecordingUI(isRecording) {
+      btn.disabled = isRecording;
+      stopBtn.style.display = isRecording ? "inline-block" : "none";
+    }
+
+    async function refreshCurrentChatName() {
+      const res = await fetch("/api/current_chat");
+      const data = await res.json();
+      chatNameEl.textContent = data.name;
+      currentChatId = data.id;
+      return data.name;
+    }
+
+    async function refreshChatList() {
+      const res = await fetch("/api/chats");
+      const data = await res.json();
+      chatListEl.innerHTML = "";
+      data.chats.forEach((chat) => {
+        const row = document.createElement("div");
+        row.className = "chat-row";
+
+        const item = document.createElement("button");
+        item.className = "chat-item";
+        item.textContent = `${chat.name} (${chat.turn_count} turn${chat.turn_count === 1 ? "" : "s"})`;
+        item.addEventListener("click", () => viewChat(chat.id));
+        row.appendChild(item);
+
+        // Can't usefully delete the chat you're actively talking in, it
+        // would just get re-saved on the next turn. Only show delete for
+        // chats other than the current one.
+        if (chat.id !== currentChatId) {
+          const del = document.createElement("button");
+          del.className = "delete-chat-btn";
+          del.textContent = "Delete";
+          del.addEventListener("click", async (e) => {
+            e.stopPropagation();
+            if (!confirm(`Delete "${chat.name}"? This can't be undone.`)) return;
+            await fetch(`/api/chats/${chat.id}`, { method: "DELETE" });
+            refreshChatList();
+          });
+          row.appendChild(del);
+        }
+
+        chatListEl.appendChild(row);
+      });
+    }
+
+    async function viewChat(chatId) {
+      const res = await fetch(`/api/chats/${chatId}`);
+      const data = await res.json();
+      log.innerHTML = data.turns.map(t => turnHtml(t.transcript, t.reply, t.timings)).join("");
+      status.textContent = `Viewing past chat: ${data.name} (read-only)`;
+      backToCurrentBtn.style.display = "inline-block";
+    }
+
+    backToCurrentBtn.addEventListener("click", () => {
+      log.innerHTML = "";
+      status.textContent = "";
+      backToCurrentBtn.style.display = "none";
+    });
+
+    btn.addEventListener("click", () => {
+      backToCurrentBtn.style.display = "none";
+      setRecordingUI(true);
+      status.textContent = "Connecting...";
+
+      const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+      ws = new WebSocket(`${protocol}//${window.location.host}/ws/turn`);
+
+      ws.onopen = () => {
+        status.textContent = "Starting...";
+      };
+
+      ws.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+
+        if (data.type === "error") {
+          status.textContent = "Error: " + data.error;
+          setRecordingUI(false);
+          return;
+        }
+
+        if (data.type === "final_result") {
+          setRecordingUI(false);
+          const result = data.result;
+          if (result.error) {
+            status.textContent = "Error: " + result.error;
+          } else if (result.stopped) {
+            status.textContent = "Stop phrase heard. Session ended.";
+            addTurn(result.transcript, null, result.timings);
+          } else {
+            status.textContent = "Done.";
+            addTurn(result.transcript, result.reply, result.timings);
+          }
+          refreshChatList();
+          return;
+        }
+
+        // Any other message type is a live progress event, pushed the
+        // instant that stage happens (no polling delay).
+        if (EVENT_LABELS[data.type]) {
+          status.textContent = EVENT_LABELS[data.type];
+        }
+      };
+
+      ws.onerror = () => {
+        status.textContent = "Connection error.";
+        setRecordingUI(false);
+      };
+
+      ws.onclose = () => {
+        setRecordingUI(false);
+      };
+    });
+
+    stopBtn.addEventListener("click", () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "stop" }));
+        status.textContent = "Stopping recording...";
+      }
+    });
+
+    newChatBtn.addEventListener("click", async () => {
+      await fetch("/api/new_chat", { method: "POST" });
+      backToCurrentBtn.style.display = "none";
+      status.textContent = "New chat started.";
+      const name = await refreshCurrentChatName();
+      showGreeting(name);
+      refreshChatList();
+    });
+
+    refreshCurrentChatName().then((name) => {
+      showGreeting(name);
+      refreshChatList();
+    });
+  </script>
+</body>
+</html>
